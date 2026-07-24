@@ -19,3 +19,37 @@ It handles remote script deployment via SMB, executes profile deletions under th
 ## ⚡ Smart Reboot & Safety Logic
 
 The script dynamically adapts its behavior based on file lock status (`0x80070020`) and active user presence:
+
+1. **Active User Protection:** Currently logged-in user profiles are detected via `quser` and automatically added to the exclusion list to prevent desktop session corruption.
+2. **Idle Machines (Locked Files):** If files are locked and **nobody is logged in**, the script registers a `PendingProfileCleanup` startup task and initiates an immediate 10-second force reboot to finalize cleanup.
+3. **Active Workstations (Locked Files):** If files are locked and a **user IS actively logged in**, the script registers the startup task for the **next manual/natural reboot** and **skips calling `shutdown.exe`** to prevent work loss.
+
+---
+
+## 📋 Prerequisites
+
+### Technician Workstation:
+* PowerShell 5.1+ running as **Administrator**.
+* Sysinternals **PsExec** installed (default path: `C:\Tools\PSTools\PsExec.exe`).
+* Files located in `C:\Temp\`:
+  * `C:\Temp\Run-RemoteCleanup.ps1`
+  * `C:\Temp\cleanprofile.ps1`
+  * `C:\Temp\computers.csv`
+
+### Target Endpoints & Domain:
+* Active Directory Domain Environment with Administrative rights over endpoints.
+* **SMB (Port 445)** accessible between technician workstation and target PCs.
+* Administrative Shares (`C$`, `ADMIN$`) enabled on targets.
+
+---
+
+## ⚙️ Setup & Configuration
+
+### 1. Populate `computers.csv`
+Add your target machine names under the `ComputerName` header inside `C:\Temp\computers.csv`:
+
+```csv
+ComputerName
+JC053509
+JC053860
+JC053861
