@@ -52,4 +52,14 @@ Add your target machine names under the `ComputerName` header inside `C:\Temp\co
 ComputerName
 JC053509
 JC053860
-JC053861
+JC053861```
+
+## 🚀 Usage
+
+> ⚠️ **Execution Location:** Run the command below on your **local technician workstation** as an elevated Administrator. The master script will handle all remote target interactions across the network automatically.
+
+Open PowerShell as **Administrator** on your local machine and execute:
+
+` ` `powershell
+PS C:\Temp> powershell.exe -ExecutionPolicy Bypass -File "C:\Temp\Run-RemoteCleanup.ps1"
+` ` `
