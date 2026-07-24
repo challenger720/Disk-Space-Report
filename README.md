@@ -2,7 +2,7 @@
 
 An automated, two-part PowerShell solution built for IT Helpdesk Technicians and System Administrators to bulk-delete stale or inactive user profiles across domain-joined Windows endpoints.
 
-It handles remote script deployment via SMB, executes profile deletions under the `NT AUTHORITY\SYSTEM` context using Sysinternals `PsExec`, and features **smart reboot safety checks** to avoid disrupting active end-users.
+It handles remote script deployment via SMB, executes profile deletions under the `NT AUTHORITY\SYSTEM` context using Sysinternals `PsExec`, and features **smart reboot safety checks** directly on the endpoint to avoid disrupting active end-users.
 
 ---
 
@@ -10,19 +10,20 @@ It handles remote script deployment via SMB, executes profile deletions under th
 
 | File Name | Purpose | Execution Location |
 | :--- | :--- | :--- |
-| **`Run-RemoteCleanup.ps1`** | Master controller script. Reads `computers.csv`, creates remote directories, pushes the worker script, executes via PsExec, and evaluates session state before scheduling reboots. | Local Workstation |
-| **`cleanprofile.ps1`** | Core worker script. Kills file-locking processes (OneDrive, Teams, Edge), detects active sessions via `quser`, preserves admin accounts, and deletes stale profiles via WMI/CIM. | Remote Target PC |
+| **`Run-RemoteCleanup.ps1`** | Master controller script. Reads `computers.csv`, verifies SMB connectivity, creates target directories, pushes the worker script, and executes via PsExec. | Local Workstation |
+| **`cleanprofile.ps1`** | Core worker script. Kills file-locking background processes, unloads orphaned registry hives, detects active sessions via `quser`, deletes stale profiles, and handles local scheduled task creation and smart reboots. | Remote Target PC |
 | **`computers.csv`** | CSV input file containing the list of target computer hostnames. | Local Workstation |
 
 ---
 
 ## ⚡ Smart Reboot & Safety Logic
 
-The script dynamically adapts its behavior based on file lock status (`0x80070020`) and active user presence:
+The worker script (`cleanprofile.ps1`) executes locally on the target machine under `NT AUTHORITY\SYSTEM` and dynamically manages file locks (`0x80070020`) and user sessions:
 
 1. **Active User Protection:** Currently logged-in user profiles are detected via `quser` and automatically added to the exclusion list to prevent desktop session corruption.
-2. **Idle Machines (Locked Files):** If files are locked and **nobody is logged in**, the script registers a `PendingProfileCleanup` startup task and initiates an immediate 10-second force reboot to finalize cleanup.
-3. **Active Workstations (Locked Files):** If files are locked and a **user IS actively logged in**, the script registers the startup task for the **next manual/natural reboot** and **skips calling `shutdown.exe`** to prevent work loss.
+2. **Idle Machines (Locked Files):** If profiles fail to delete due to background process locks and **nobody is logged in**, `cleanprofile.ps1` registers a `PendingProfileCleanup` startup task and initiates an immediate **5-second local force reboot** to finalize cleanup at boot.
+3. **Active Workstations (Locked Files):** If profiles fail to delete and a **user IS actively logged in**, the script registers the startup task for the **next manual/natural reboot** and **skips `shutdown.exe`** to prevent work loss.
+4. **Self-Cleaning:** Once all targeted profiles are wiped successfully, the script automatically unregisters and deletes the `PendingProfileCleanup` task.
 
 ---
 
