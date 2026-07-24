@@ -1,6 +1,7 @@
 # ==============================================================================
 # Script Name: Run-RemoteCleanup.ps1
-# Location:    C:\Temp\Run-RemoteCleanup.ps1
+# Description: Reads C:\Temp\computers.csv, pushes C:\Temp\cleanprofile.ps1 to 
+#              each machine via SMB, executes via PsExec, and handles smart reboots.
 # Run Level:   Run locally on YOUR technician workstation as Administrator
 # ==============================================================================
 
@@ -52,36 +53,36 @@ foreach ($row in $computerList) {
 
     try {
         # --- STEP 1: FORCE C:\Temp TO EXIST ON TARGET ---
-        Write-Host "[1/3] Ensuring C:\Temp exists on $target..." -ForegroundColor Cyan
+        Write-Host "[1/4] Ensuring C:\Temp exists on $target..." -ForegroundColor Cyan
         & $PsExecPath \\$target -s cmd.exe /c "if not exist C:\Temp mkdir C:\Temp" | Out-Null
 
         # --- STEP 2: COPY CLEANPROFILE.PS1 DIRECTLY TO C:\Temp ---
-        Write-Host "[2/3] Copying '$LocalScript' to \\$target\C$\Temp\..." -ForegroundColor Cyan
+        Write-Host "[2/4] Copying '$LocalScript' to \\$target\C$\Temp\..." -ForegroundColor Cyan
         
         $destinationPath = "\\$target\C$\Temp\cleanprofile.ps1"
         Copy-Item -Path $LocalScript -Destination $destinationPath -Force -ErrorAction Stop
         
-        if (Test-Path $destinationPath) {
-            Write-Host " -> Successfully verified cleanprofile.ps1 is sitting in C:\Temp on $target!" -ForegroundColor Green
-        } else {
+        if (-not (Test-Path $destinationPath)) {
             throw "Failed to verify file copy to $destinationPath"
         }
 
         # --- STEP 3: EXECUTE CLEANPROFILE.PS1 FROM C:\Temp UNDER SYSTEM ---
-        Write-Host "[3/3] Executing cleanup script on $target under SYSTEM context..." -ForegroundColor Cyan
+        Write-Host "[3/4] Executing cleanup script on $target under SYSTEM context..." -ForegroundColor Cyan
         
         & $PsExecPath \\$target -s powershell.exe -ExecutionPolicy Bypass -File "C:\Temp\cleanprofile.ps1"
 
-        # --- STEP 4: VERIFY REMAINING PROFILES & SCHEDULE REBOOT IF LOCKED ---
-        Write-Host "[4/4] Verifying profile cleanup on $target..." -ForegroundColor Cyan
+        # --- STEP 4: VERIFY REMAINING PROFILES & SMART REBOOT LOGIC ---
+        Write-Host "[4/4] Verifying profile cleanup status on $target..." -ForegroundColor Cyan
         
         $daysInactive = 0
         $excludedUsers = @('Administrator', 'Default', 'Default User', 'Public', 'SAdmin', 'All Users')
 
+        # Query logged in users
         $currentUsers = Invoke-Command -ComputerName $target -ScriptBlock {
             quser 2>$null | ForEach-Object { if ($_ -match '^\s*([a-zA-Z0-9\._-]+)') { $Matches[1] } }
         } -ErrorAction SilentlyContinue
 
+        # Query profiles that could not be deleted
         $remainingProfiles = Get-CimInstance -ComputerName $target Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object {
             -not $_.Special -and
             $_.LocalPath -like 'C:\Users\*' -and
@@ -91,16 +92,20 @@ foreach ($row in $computerList) {
 
         if ($remainingProfiles.Count -gt 0) {
             Write-Warning "Found $($remainingProfiles.Count) profile(s) on $target locked by background processes."
-            Write-Host "Scheduling startup task and initiating reboot on $target..." -ForegroundColor Yellow
 
-            # Schedule startup task pointing directly to C:\Temp\cleanprofile.ps1
+            # Register startup task to clean on next boot
             $cmdTask = "schtasks /create /tn PendingProfileCleanup /tr `"powershell.exe -ExecutionPolicy Bypass -File C:\Temp\cleanprofile.ps1`" /sc onstart /ru `"NT AUTHORITY\SYSTEM`" /f"
             Invoke-Command -ComputerName $target -ScriptBlock { param($cmd) cmd.exe /c $cmd } -ArgumentList $cmdTask -ErrorAction SilentlyContinue
 
-            # Trigger reboot
-            Invoke-Command -ComputerName $target -ScriptBlock { shutdown.exe /r /t 10 /f /c "Rebooting to complete user profile cleanup." } -ErrorAction SilentlyContinue
-
-            $results += [PSCustomObject]@{ ComputerName = $target; Status = "Scheduled Reboot (Locked Profiles)" }
+            if ($currentUsers.Count -gt 0) {
+                Write-Warning "User ($($currentUsers -join ', ')) is actively logged into $target."
+                Write-Host "Scheduled task for NEXT manual reboot to avoid interrupting user." -ForegroundColor Yellow
+                $results += [PSCustomObject]@{ ComputerName = $target; Status = "Scheduled (Pending Next Manual Reboot)" }
+            } else {
+                Write-Host "No active users detected on $target. Initiating reboot..." -ForegroundColor Yellow
+                Invoke-Command -ComputerName $target -ScriptBlock { shutdown.exe /r /t 10 /f /c "Rebooting to complete user profile cleanup." } -ErrorAction SilentlyContinue
+                $results += [PSCustomObject]@{ ComputerName = $target; Status = "Scheduled Reboot (Locked Profiles)" }
+            }
         } else {
             Write-Host "SUCCESS: All target profiles removed on $target!" -ForegroundColor Green
             $results += [PSCustomObject]@{ ComputerName = $target; Status = "Cleaned (No Reboot Required)" }
