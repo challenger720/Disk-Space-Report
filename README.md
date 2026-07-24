@@ -52,7 +52,9 @@ Add your target machine names under the `ComputerName` header inside `C:\Temp\co
 ComputerName
 JC053509
 JC053860
-JC053861```
+JC053861
+
+---
 
 ## 🚀 Usage
 
