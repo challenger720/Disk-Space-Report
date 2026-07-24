@@ -74,24 +74,38 @@ foreach ($row in $computerList) {
         # --- STEP 4: VERIFY REMAINING PROFILES & SMART REBOOT LOGIC ---
         Write-Host "[4/4] Verifying profile cleanup status on $target..." -ForegroundColor Cyan
         
-        $daysInactive = 0
         $excludedUsers = @('Administrator', 'Default', 'Default User', 'Public', 'SAdmin', 'All Users')
 
-        # Query logged in users
+        # Get active logged-in users with clean string trimming
         $currentUsers = Invoke-Command -ComputerName $target -ScriptBlock {
-            quser 2>$null | ForEach-Object { if ($_ -match '^\s*([a-zA-Z0-9\._-]+)') { $Matches[1] } }
+            (quser 2>$null) | ForEach-Object {
+                if ($_ -match '^\s*([a-zA-Z0-9\._-]+)') { $Matches[1].Trim() }
+            }
         } -ErrorAction SilentlyContinue
 
-        # Query profiles that could not be deleted
-        $remainingProfiles = Get-CimInstance -ComputerName $target Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object {
-            -not $_.Special -and
-            $_.LocalPath -like 'C:\Users\*' -and
-            !(($excludedUsers + $currentUsers) -contains ($_.LocalPath -split '\\')[-1]) -and
-            $_.LastUseTime -lt (Get-Date).AddDays(-$daysInactive)
+        $protectedList = $excludedUsers + $currentUsers
+
+        # Check 1: Query remaining profiles via WMI
+        $remainingWmiProfiles = Get-CimInstance -ComputerName $target Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object {
+            if (-not $_.Special -and $_.LocalPath -like 'C:\Users\*') {
+                $folderName = ($_.LocalPath -split '\\')[-1].Trim()
+                return ($protectedList -notcontains $folderName)
+            }
+            return $false
         }
 
-        if ($remainingProfiles.Count -gt 0) {
-            Write-Warning "Found $($remainingProfiles.Count) profile(s) on $target locked by background processes."
+        # Check 2: Physical directory verification directly in C:\Users
+        $remainingDiskFolders = Invoke-Command -ComputerName $target -ScriptBlock {
+            param($protected)
+            Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object {
+                $protected -notcontains $_.Name
+            } | Select-Object -ExpandProperty Name
+        } -ArgumentList (,$protectedList) -ErrorAction SilentlyContinue
+
+        # If locked profiles exist in WMI OR as leftover folders on disk
+        if (($remainingWmiProfiles.Count -gt 0) -or ($remainingDiskFolders.Count -gt 0)) {
+            $lockedCount = [Math]::Max($remainingWmiProfiles.Count, $remainingDiskFolders.Count)
+            Write-Warning "Found $lockedCount profile folder(s) on $target still present/locked on disk."
 
             # Register startup task to clean on next boot
             $cmdTask = "schtasks /create /tn PendingProfileCleanup /tr `"powershell.exe -ExecutionPolicy Bypass -File C:\Temp\cleanprofile.ps1`" /sc onstart /ru `"NT AUTHORITY\SYSTEM`" /f"
@@ -99,10 +113,10 @@ foreach ($row in $computerList) {
 
             if ($currentUsers.Count -gt 0) {
                 Write-Warning "User ($($currentUsers -join ', ')) is actively logged into $target."
-                Write-Host "Scheduled task for NEXT manual reboot to avoid interrupting user." -ForegroundColor Yellow
+                Write-Host "Scheduled task registered for NEXT manual reboot (skipping force reboot)." -ForegroundColor Yellow
                 $results += [PSCustomObject]@{ ComputerName = $target; Status = "Scheduled (Pending Next Manual Reboot)" }
             } else {
-                Write-Host "No active users detected on $target. Initiating reboot..." -ForegroundColor Yellow
+                Write-Host "No active users detected on $target. Initiating reboot to clear locks..." -ForegroundColor Yellow
                 Invoke-Command -ComputerName $target -ScriptBlock { shutdown.exe /r /t 10 /f /c "Rebooting to complete user profile cleanup." } -ErrorAction SilentlyContinue
                 $results += [PSCustomObject]@{ ComputerName = $target; Status = "Scheduled Reboot (Locked Profiles)" }
             }
